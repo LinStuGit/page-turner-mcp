@@ -2,6 +2,15 @@ name = "page-turner-mcp"
 main = "src/index.js"
 compatibility_date = "2024-01-01"
 
+# Durable Objects
+[[durable_objects.bindings]]
+name = "CONTROL_ROOM"
+class_name = "ControlRoom"
+
+[[durable_objects.migrations]]
+tag = "v1"
+new_classes = ["ControlRoom"]
+
 # Secrets 配置 (部署时设置)
 # wrangler secret put MCP_ENDPOINT  # MCP服务端点地址
 # wrangler secret put AI_CLIENT_URL  # AI客户端连接地址
