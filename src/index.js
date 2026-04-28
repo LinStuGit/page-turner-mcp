@@ -5,167 +5,168 @@
  * AI通过固定地址连接MCP服务器
  */
 
-// Durable Object - 管理WebSocket连接
-export class ControlRoom {
-  constructor(state, env) {
-    this.state = state;
-    this.env = env;
-    this.aiSocket = null;
-    this.controlSocket = null;
-    this.pendingResolver = null;
+// 内存存储 WebSocket 连接（全局）
+const connections = {
+  ai: null,
+  control: null,
+  pendingResolver: null
+};
+
+// 处理 AI 客户端连接
+async function handleAIClient(request) {
+  if (connections.ai) {
+    // 断开旧连接
+    try { connections.ai.close(); } catch (e) {}
   }
+  
+  const pair = new WebSocketPair();
+  connections.ai = pair.server;
+  connections.ai.accept();
 
-  // 处理AI客户端连接
-  async handleAIClient(request) {
-    const pair = new WebSocketPair();
-    this.aiSocket = pair.server;
-    this.aiSocket.accept();
+  connections.ai.addEventListener('message', async (event) => {
+    try {
+      const msg = JSON.parse(event.data);
 
-    this.aiSocket.addEventListener('message', async (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-
-        if (msg.method === 'initialize') {
-          await this.aiSocket.send(JSON.stringify({
-            jsonrpc: '2.0', id: msg.id,
-            result: {
-              protocolVersion: '2024-11-05',
-              capabilities: { tools: {} },
-              serverInfo: { name: 'page-turner', version: '1.0.0' }
-            }
-          }));
-          await this.aiSocket.send(JSON.stringify({
-            jsonrpc: '2.0', method: 'notifications/initialized'
-          }));
-          this.notifyControl({ type: 'log', message: 'AI已连接' });
-          return;
-        }
-
-        if (msg.method === 'ping') {
-          await this.aiSocket.send(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }));
-          return;
-        }
-
-        if (msg.method === 'tools/list') {
-          await this.aiSocket.send(JSON.stringify({
-            jsonrpc: '2.0', id: msg.id,
-            result: {
-              tools: [{
-                name: 'page_turn',
-                description: '执行翻页动作',
-                inputSchema: { type: 'object', properties: {}, required: [] }
-              }]
-            }
-          }));
-          return;
-        }
-
-        if (msg.method === 'tools/call' && msg.params) {
-          const toolName = msg.params.name;
-
-          if (toolName === 'page_turn') {
-            if (!this.controlSocket) {
-              await this.aiSocket.send(JSON.stringify({
-                jsonrpc: '2.0', id: msg.id,
-                error: { code: -32603, message: 'No control client connected' }
-              }));
-              return;
-            }
-
-            this.controlSocket.send(JSON.stringify({ type: 'command', action: 'page_turn' }));
-            const result = await this.waitForResult(10000);
-
-            await this.aiSocket.send(JSON.stringify({
-              jsonrpc: '2.0', id: msg.id,
-              result: { content: [{ type: 'text', text: JSON.stringify(result) }] }
-            }));
-          } else {
-            await this.aiSocket.send(JSON.stringify({
-              jsonrpc: '2.0', id: msg.id,
-              error: { code: -32601, message: `Unknown tool: ${toolName}` }
-            }));
+      if (msg.method === 'initialize') {
+        await connections.ai.send(JSON.stringify({
+          jsonrpc: '2.0', id: msg.id,
+          result: {
+            protocolVersion: '2024-11-05',
+            capabilities: { tools: {} },
+            serverInfo: { name: 'page-turner', version: '1.0.0' }
           }
-        }
-      } catch (e) {
-        console.error('AI message error:', e);
+        }));
+        await connections.ai.send(JSON.stringify({
+          jsonrpc: '2.0', method: 'notifications/initialized'
+        }));
+        notifyControl({ type: 'log', message: 'AI已连接' });
+        return;
       }
-    });
 
-    this.aiSocket.addEventListener('close', () => {
-      this.aiSocket = null;
-      this.notifyControl({ type: 'log', message: 'AI已断开' });
-    });
+      if (msg.method === 'ping') {
+        await connections.ai.send(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }));
+        return;
+      }
 
-    return new Response(null, { status: 101, webSocket: pair });
-  }
+      if (msg.method === 'tools/list') {
+        await connections.ai.send(JSON.stringify({
+          jsonrpc: '2.0', id: msg.id,
+          result: {
+            tools: [{
+              name: 'page_turn',
+              description: '执行翻页动作',
+              inputSchema: { type: 'object', properties: {}, required: [] }
+            }]
+          }
+        }));
+        return;
+      }
 
-  // 处理控制客户端连接（网页）
-  async handleControlClient(request) {
-    const pair = new WebSocketPair();
-    this.controlSocket = pair.server;
-    this.controlSocket.accept();
+      if (msg.method === 'tools/call' && msg.params) {
+        const toolName = msg.params.name;
 
-    this.controlSocket.addEventListener('message', async (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'result' && this.pendingResolver) {
-          this.pendingResolver(msg.result);
-          this.pendingResolver = null;
-        }
-        if (msg.type === 'log' && this.aiSocket) {
-          this.aiSocket.send(JSON.stringify({
-            jsonrpc: '2.0', method: 'log', params: { message: msg.message }
+        if (toolName === 'page_turn') {
+          if (!connections.control) {
+            await connections.ai.send(JSON.stringify({
+              jsonrpc: '2.0', id: msg.id,
+              error: { code: -32603, message: 'No control client connected' }
+            }));
+            return;
+          }
+
+          connections.control.send(JSON.stringify({ type: 'command', action: 'page_turn' }));
+          const result = await waitForResult(10000);
+
+          await connections.ai.send(JSON.stringify({
+            jsonrpc: '2.0', id: msg.id,
+            result: { content: [{ type: 'text', text: JSON.stringify(result) }] }
+          }));
+        } else {
+          await connections.ai.send(JSON.stringify({
+            jsonrpc: '2.0', id: msg.id,
+            error: { code: -32601, message: `Unknown tool: ${toolName}` }
           }));
         }
-      } catch (e) {
-        console.error('Control message error:', e);
       }
-    });
-
-    this.controlSocket.addEventListener('close', () => {
-      this.controlSocket = null;
-    });
-
-    return new Response(null, { status: 101, webSocket: pair });
-  }
-
-  notifyControl(msg) {
-    if (this.controlSocket) {
-      this.controlSocket.send(JSON.stringify(msg));
+    } catch (e) {
+      console.error('AI message error:', e);
     }
-  }
+  });
 
-  waitForResult(timeout) {
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        this.pendingResolver = null;
-        resolve({ success: true, message: 'timeout' });
-      }, timeout);
-      this.pendingResolver = (result) => {
-        clearTimeout(timer);
-        resolve(result);
-      };
-    });
+  connections.ai.addEventListener('close', () => {
+    connections.ai = null;
+    notifyControl({ type: 'log', message: 'AI已断开' });
+  });
+
+  return new Response(null, { status: 101, webSocket: pair });
+}
+
+// 处理控制客户端连接（网页）
+async function handleControlClient(request) {
+  if (connections.control) {
+    try { connections.control.close(); } catch (e) {}
   }
+  
+  const pair = new WebSocketPair();
+  connections.control = pair.server;
+  connections.control.accept();
+
+  connections.control.addEventListener('message', async (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'result' && connections.pendingResolver) {
+        connections.pendingResolver(msg.result);
+        connections.pendingResolver = null;
+      }
+      if (msg.type === 'log' && connections.ai) {
+        connections.ai.send(JSON.stringify({
+          jsonrpc: '2.0', method: 'log', params: { message: msg.message }
+        }));
+      }
+    } catch (e) {
+      console.error('Control message error:', e);
+    }
+  });
+
+  connections.control.addEventListener('close', () => {
+    connections.control = null;
+  });
+
+  return new Response(null, { status: 101, webSocket: pair });
+}
+
+function notifyControl(msg) {
+  if (connections.control) {
+    connections.control.send(JSON.stringify(msg));
+  }
+}
+
+function waitForResult(timeout) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      connections.pendingResolver = null;
+      resolve({ success: true, message: 'timeout' });
+    }, timeout);
+    connections.pendingResolver = (result) => {
+      clearTimeout(timer);
+      resolve(result);
+    };
+  });
 }
 
 // Worker 主入口
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    
-    // Durable Objects
-    const roomId = env.CONTROL_ROOM.idFromName('main');
-    const room = env.CONTROL_ROOM.get(roomId);
 
     // MCP 端点 (AI固定连接)
     if (url.pathname === '/mcp') {
-      return room.handleAIClient(request);
+      return handleAIClient(request);
     }
 
     // 控制端点 (网页连接)
     if (url.pathname === '/control') {
-      return room.handleControlClient(request);
+      return handleControlClient(request);
     }
 
     // 主页
